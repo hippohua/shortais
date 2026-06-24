@@ -1,0 +1,9 @@
+pywencai
+mootdx
+akshare
+pandas
+numpy
+openpyxl
+scikit-learn
+flask
+requests
