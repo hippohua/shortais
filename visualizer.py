@@ -32,6 +32,16 @@ try:
 except Exception:
     AKSHARE_AVAILABLE = False
 
+# 扶摇API
+FUYAO_AVAILABLE = False
+try:
+    from config import FUYAO_API_KEY
+    if FUYAO_API_KEY and FUYAO_API_KEY.strip():
+        from fuyao_client import fetch_kline as fuyao_kline
+        FUYAO_AVAILABLE = True
+except Exception:
+    pass
+
 from config import (
     MOMENTUM_DAYS, MOMENTUM_TOP_N, KLINE_DAYS, OUTPUT_DIR
 )
@@ -100,11 +110,20 @@ def _normalize_df(df) -> pd.DataFrame:
 def fetch_kline_data(code: str, days: int, end_date: str) -> pd.DataFrame:
     """
     获取个股K线数据用于画图
-    路径: dcsdk → mootdx(try 3次, 双frequency) → akshare(try 2次) → 空
+    路径: 扶摇API → dcsdk → mootdx(try 3次, 双frequency) → akshare(try 2次) → 空
     """
     import time as _time
 
-    # === 路径1: dcsdk（首选） ===
+    # === 路径0: 同花顺扶摇API（首选） ===
+    if FUYAO_AVAILABLE:
+        try:
+            df = fuyao_kline(code, days=days, end_date=end_date, adjust='forward')
+            if df is not None and not df.empty:
+                return df.tail(days)
+        except Exception as e:
+            print(f"    [WARN] 扶摇API K线 {code} 获取失败: {e}")
+
+    # === 路径1: dcsdk ===
     if DCSDK_AVAILABLE:
         try:
             raw = dcsdk_kline(str(code), "day")
@@ -142,7 +161,6 @@ def fetch_kline_data(code: str, days: int, end_date: str) -> pd.DataFrame:
                         pass
                 if attempt < _MOOTDX_RETRIES - 1:
                     _time.sleep(_RETRY_BACKOFF ** attempt)
-                    # 重建连接
                     global _mootdx_client
                     _mootdx_client = None
                     client = _get_mootdx_client()

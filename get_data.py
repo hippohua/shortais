@@ -583,34 +583,126 @@ def standardize_columns(df: pd.DataFrame, data_type: str) -> pd.DataFrame:
     return df
 
 
+# ==================== 扶摇API 方案（新增首选） ====================
+
+# 扶摇是否可用
+FUYAO_AVAILABLE = False
+try:
+    from config import FUYAO_API_KEY
+    if FUYAO_API_KEY and FUYAO_API_KEY.strip():
+        FUYAO_AVAILABLE = True
+except Exception:
+    pass
+
+
+def fetch_volume_and_hot_fuyao() -> tuple:
+    """
+    【首选方案】同花顺扶摇API 全市场行情 → 成交额排名 + 热度排名
+    热度 = 成交量排名分位 × |涨跌幅|（因扶摇快照不含换手率，用成交量替代）
+    返回: (volume_df, hot_df)
+    """
+    from fuyao_client import fetch_quotes_batch, get_all_a_stock_codes
+
+    print("[0/3] 正在通过 同花顺扶摇API 获取全市场数据...")
+
+    # Step A: 获取全部A股代码
+    codes = get_all_a_stock_codes()
+    if not codes:
+        print("  [WARN] 扶摇API 无法获取A股代码列表")
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Step B: 批量获取行情
+    print(f"  [INFO] 正在通过扶摇API获取 {len(codes)} 只股票行情（分批）...")
+    quotes = fetch_quotes_batch(codes)
+    if not quotes:
+        print("  [WARN] 扶摇API 行情获取失败（全部批次为空）")
+        return pd.DataFrame(), pd.DataFrame()
+
+    print(f"  [OK] 成功获取 {len(quotes)} 只股票行情")
+
+    # Step C: 构建 DataFrame
+    records = []
+    for code, q in quotes.items():
+        records.append({
+            'code': code,
+            'name': q.get('name', ''),
+            'close': q.get('close', 0),
+            'pct_change': q.get('pct_change', 0),
+            'volume_amount': q.get('volume_amount', 0),  # 单位: 元
+            'volume_shares': q.get('volume_shares', 0),
+            'high': q.get('high', 0),
+            'low': q.get('low', 0),
+            'open': q.get('open', 0),
+            'pre_close': q.get('pre_close', 0),
+        })
+
+    df = pd.DataFrame(records)
+    df = df[(df['close'] > 0) & (df['volume_amount'] > 0)]
+
+    if df.empty:
+        print("  [WARN] 扶摇API 返回数据均为无效")
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Step D: 成交额排名 TOP N
+    df = df.sort_values('volume_amount', ascending=False).head(max(VOLUME_TOP_N, HOT_TOP_N) * 3)
+    df['rank'] = range(1, len(df) + 1)
+
+    volume_df = df.head(VOLUME_TOP_N).copy()
+    volume_df['rank'] = range(1, len(volume_df) + 1)
+    volume_df = volume_df.reset_index(drop=True)
+
+    # Step E: 热度排名（成交量 × |涨跌幅| 作为热度代理）
+    # 扶摇快照不含换手率，用成交量归一化后 × |涨跌幅| 模拟热度
+    max_vol = df['volume_shares'].max()
+    if max_vol > 0:
+        df['hot_value'] = (df['volume_shares'] / max_vol) * df['pct_change'].abs() * 100
+    else:
+        df['hot_value'] = df['pct_change'].abs()
+    hot_df = df.sort_values('hot_value', ascending=False).head(HOT_TOP_N).copy()
+    hot_df['hot_rank'] = range(1, len(hot_df) + 1)
+    hot_df = hot_df.reset_index(drop=True)
+
+    print(f"  [OK] 扶摇API方案: 成交额TOP{len(volume_df)}只, 热度TOP{len(hot_df)}只")
+    return volume_df, hot_df
+
+
 # ==================== 主入口：多级回退机制 ====================
 
 def fetch_data(date_str: str) -> tuple:
     """
     获取数据，按优先级依次尝试：
-      1. 东方财富 datacenter + 腾讯 qt.gtimg.cn（批量行情，成交额+热度排名）
-      2. pywencai（自然语言选股）
-      3. 同花顺热点接口（作为热度数据补充）
+      1. 同花顺扶摇API（首选，官方金融数据）
+      2. 东方财富 datacenter + 腾讯 qt.gtimg.cn（批量行情，成交额+热度排名）
+      3. pywencai（自然语言选股）
       4. akshare（仅作兜底，注意反爬限制）
 
     返回: (volume_df, hot_df, source)
     """
     volume_df = None
     hot_df = None
-    source = 'tencent'
+    source = 'fuyao'
 
-    # ---- 第一优先：datacenter + 腾讯行情（主力方案） ----
+    # ---- 第一优先：同花顺扶摇API ----
+    if FUYAO_AVAILABLE:
+        try:
+            volume_df, hot_df = fetch_volume_and_hot_fuyao()
+            if volume_df is not None and not volume_df.empty and hot_df is not None and not hot_df.empty:
+                print("  [OK] 扶摇API方案数据获取成功")
+                source = 'fuyao'
+
+                volume_df = standardize_columns(volume_df, 'volume')
+                hot_df = standardize_columns(hot_df, 'hot')
+                _finalize_codes(volume_df, hot_df)
+                return volume_df, hot_df, source
+        except Exception as e:
+            print(f"  [WARN] 扶摇API方案获取失败: {e}")
+
+    # ---- 第二优先：datacenter + 腾讯行情 ----
     try:
         volume_df, hot_df = fetch_volume_and_hot_tencent()
         if volume_df is not None and not volume_df.empty and hot_df is not None and not hot_df.empty:
             print("  [OK] 腾讯行情方案数据获取成功")
             source = 'tencent'
-
-            # 尝试补充同花顺热点标签（非阻塞）
-            hot_10jqka = fetch_hotspot_10jqka()
-            if not hot_10jqka.empty:
-                source = 'tencent + 10jqka热点'
-                print(f"  [OK] 同花顺热点标签补充成功（{len(hot_10jqka)}只）")
 
             volume_df = standardize_columns(volume_df, 'volume')
             hot_df = standardize_columns(hot_df, 'hot')
@@ -619,7 +711,7 @@ def fetch_data(date_str: str) -> tuple:
     except Exception as e:
         print(f"  [WARN] 腾讯行情方案获取失败: {e}")
 
-    # ---- 第二优先：pywencai ----
+    # ---- 第三优先：pywencai ----
     if PYWENCAI_AVAILABLE:
         try:
             volume_df = fetch_volume_top_wencai(date_str)
@@ -628,11 +720,6 @@ def fetch_data(date_str: str) -> tuple:
                 source = 'pywencai'
                 print("  [OK] pywencai 数据获取成功")
 
-                hot_10jqka = fetch_hotspot_10jqka()
-                if not hot_10jqka.empty:
-                    source = 'pywencai + 10jqka热点'
-                    print(f"  [OK] 同花顺热点标签补充成功（{len(hot_10jqka)}只）")
-
                 volume_df = standardize_columns(volume_df, 'volume')
                 hot_df = standardize_columns(hot_df, 'hot')
                 _finalize_codes(volume_df, hot_df)
@@ -640,17 +727,18 @@ def fetch_data(date_str: str) -> tuple:
         except Exception as e:
             print(f"  [WARN] pywencai 获取失败: {e}")
 
-    # ---- 第三优先：akshare（兜底） ----
+    # ---- 第四优先：akshare（兜底） ----
     print("  [INFO] 回退到 akshare（注意：行情类接口有反爬风险）...")
     source = 'akshare'
 
     if not AKSHARE_AVAILABLE:
         raise RuntimeError(
-            "所有数据源均不可用（tencent/pywencai/akshare 均失败）。\n"
+            "所有数据源均不可用（fuyao/tencent/pywencai/akshare 均失败）。\n"
             "可能原因：\n"
             "  1. 网络连接不稳定\n"
             "  2. 所有数据源接口均被限制\n"
-            "  3. 非交易时段（建议在 9:30-15:30 期间运行）\n"
+            "  3. 未配置扶摇API Key\n"
+            "  4. 非交易时段（建议在 9:30-15:30 期间运行）\n"
             "建议：等待几分钟后重试，或检查网络代理设置"
         )
 
@@ -697,7 +785,7 @@ def main():
     print(f"{'='*50}")
     print(f"  短线助手 — 数据获取")
     print(f"  日期: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"  数据链: 腾讯行情(主力) → pywencai(备) → 同花顺热点 → akshare(兜底)")
+    print(f"  数据链: 扶摇API(主力) → 腾讯行情 → pywencai → akshare(兜底)")
     print(f"{'='*50}")
 
     volume_df, hot_df, source = fetch_data(today)

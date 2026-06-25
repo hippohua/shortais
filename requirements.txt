@@ -1,9 +1,15 @@
+# 数据源
 pywencai
 mootdx
 akshare
+
+# 核心
 pandas
 numpy
 openpyxl
 scikit-learn
+
+# Web
 flask
 requests
+urllib3

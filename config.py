@@ -2,11 +2,15 @@
 短线助手 (shortais) — 配置参数
 所有可调参数集中管理
 
-数据源架构（遵循《A股数据源横评》知乎专栏建议）：
-  选股层: pywencai（自然语言查询） → 同花顺热点（题材标签）
-  K线层:  mootdx（通达信TCP，零鉴权不封IP） → akshare（仅兜底）
-  估值层: （本项目偏动量，暂不使用腾讯财经PE/PB）
+数据源架构：
+  首选: 同花顺扶摇金融数据API（fuyao.aicubes.cn）
+  备选: 腾讯 qt.gtimg.cn（批量行情） + dcsdk（K线/板块）
+  兜底: mootdx + akshare
 """
+
+# ==================== 同花顺扶摇API ====================
+FUYAO_API_KEY = "sk-fuyao-w0CCV8H2Nt4O2a7AAzoYWb8ULDxdh3Nc"  # 请填入你在 https://fuyao.aicubes.cn/admin/ 创建的 API Key
+FUYAO_BASE_URL = "https://fuyao.aicubes.cn"
 
 # ==================== 筛选参数 ====================
 VOLUME_TOP_N = 100       # 成交额排名取前N只
